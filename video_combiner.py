@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence, TextIO
 
@@ -17,6 +18,14 @@ DEFAULT_MUSIC_DIR = Path(
     "/mnt/ianch-Secondary/Downloads/Compressed/"
     "Frieren Beyond Journey's End Original Soundtrack [MP3]"
 )
+VIDEO_EXTENSIONS = {".mp4"}
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+
+
+@dataclass(frozen=True)
+class MediaItem:
+    path: Path
+    kind: str
 
 
 def set_mtime(path: Path, timestamp: float) -> None:
@@ -33,22 +42,44 @@ def find_videos(input_dir: Path) -> list[Path]:
     return sorted(videos, key=lambda path: (path.stat().st_mtime, path.name.lower()))
 
 
+def find_media(input_dir: Path) -> list[MediaItem]:
+    """Return top-level videos and photos in chronological camera order."""
+    if not input_dir.is_dir():
+        raise ValueError(f"Input directory does not exist: {input_dir}")
+
+    media: list[MediaItem] = []
+    for path in input_dir.iterdir():
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            media.append(MediaItem(path, "video"))
+        elif suffix in PHOTO_EXTENSIONS:
+            media.append(MediaItem(path, "photo"))
+
+    return sorted(media, key=lambda item: (item.path.stat().st_mtime, item.path.name.lower()))
+
+
 def find_music(music_dir: Path) -> list[Path]:
-    """Return MP3 tracks from Disc 1 and Disc 2, sorted by disc then filename."""
+    """Return MP3 tracks from music_dir and its immediate subdirectories."""
     if not music_dir.is_dir():
         raise ValueError(f"Music directory does not exist: {music_dir}")
 
     tracks: list[Path] = []
-    for disc_name in ("Disc 1", "Disc 2"):
-        disc = music_dir / disc_name
-        if disc.is_dir():
+    for path in music_dir.iterdir():
+        if path.is_file() and path.suffix.lower() == ".mp3":
+            tracks.append(path)
+        elif path.is_dir():
             tracks.extend(
-                path
-                for path in disc.iterdir()
-                if path.is_file() and path.suffix.lower() == ".mp3"
+                child
+                for child in path.iterdir()
+                if child.is_file() and child.suffix.lower() == ".mp3"
             )
 
-    return sorted(tracks, key=lambda path: (path.parent.name.lower(), path.name.lower()))
+    return sorted(
+        tracks,
+        key=lambda path: tuple(part.lower() for part in path.relative_to(music_dir).parts),
+    )
 
 
 def quote_for_concat_file(path: Path) -> str:
@@ -169,6 +200,92 @@ def build_ffmpeg_command(
     return command
 
 
+def build_rendered_ffmpeg_command(
+    *,
+    media_items: Sequence[MediaItem],
+    audio_flags: Sequence[bool],
+    durations: Sequence[float],
+    music_list: Path,
+    output: Path,
+    original_volume: float,
+    music_volume: float,
+) -> list[str]:
+    if not (len(media_items) == len(audio_flags) == len(durations)):
+        raise ValueError("media_items, audio_flags, and durations must have the same length")
+
+    command = ["ffmpeg", "-y"]
+    for item, duration in zip(media_items, durations):
+        if item.kind == "photo":
+            command.extend(["-loop", "1", "-t", f"{duration:g}", "-i", str(item.path)])
+        else:
+            command.extend(["-i", str(item.path)])
+    command.extend(["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", str(music_list)])
+
+    filter_parts: list[str] = []
+    concat_inputs: list[str] = []
+    for index, (item, has_audio, duration) in enumerate(zip(media_items, audio_flags, durations)):
+        if item.kind == "photo":
+            filter_parts.append(
+                f"[{index}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,"
+                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+                "setsar=1,fps=30,format=yuv420p,"
+                f"trim=duration={duration:g},setpts=PTS-STARTPTS[v{index}]"
+            )
+        else:
+            filter_parts.append(
+                f"[{index}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,"
+                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+                f"setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
+            )
+
+        if has_audio:
+            filter_parts.append(
+                f"[{index}:a:0]volume={original_volume},"
+                "aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"asetpts=PTS-STARTPTS[a{index}]"
+            )
+        else:
+            filter_parts.append(
+                "anullsrc=channel_layout=stereo:"
+                f"sample_rate=48000:d={duration:g}[a{index}]"
+            )
+        concat_inputs.extend([f"[v{index}]", f"[a{index}]"])
+
+    music_index = len(media_items)
+    filter_parts.extend(
+        [
+            "".join(concat_inputs)
+            + f"concat=n={len(media_items)}:v=1:a=1:unsafe=1[v][original]",
+            f"[{music_index}:a:0]volume={music_volume}[music]",
+            "[original][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
+        ]
+    )
+
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            str(output),
+        ]
+    )
+    return command
+
+
 def merge_videos(
     *,
     input_dir: Path,
@@ -176,6 +293,7 @@ def merge_videos(
     music_dir: Path,
     original_volume: float = 0.2,
     music_volume: float = 0.85,
+    photo_duration: float = 7.0,
     dry_run: bool = False,
     quiet: bool = False,
     log: TextIO = sys.stdout,
@@ -184,14 +302,21 @@ def merge_videos(
         if not quiet:
             print(message, file=log)
 
-    videos = find_videos(input_dir)
+    media_items = find_media(input_dir)
+    videos = [item.path for item in media_items if item.kind == "video"]
+    photos = [item.path for item in media_items if item.kind == "photo"]
+    if not media_items:
+        raise ValueError(f"No MP4, JPG, JPEG, or PNG files found in {input_dir}")
     if not videos:
-        raise ValueError(f"No MP4 files found in {input_dir}")
-    log_message(f"Found {len(videos)} MP4 files")
+        log_message("Found 0 MP4 files")
+    else:
+        log_message(f"Found {len(videos)} MP4 files")
+    if photos:
+        log_message(f"Found {len(photos)} photo files")
     audio_flags = [has_audio_stream(video) for video in videos]
     audio_count = sum(audio_flags)
-    durations = [get_duration(video) for video in videos]
-    if audio_count == len(videos):
+    video_durations = [get_duration(video) for video in videos]
+    if videos and audio_count == len(videos):
         log_message("Original audio detected; mixing it under the soundtrack")
     elif audio_count:
         log_message(
@@ -201,9 +326,21 @@ def merge_videos(
     else:
         log_message("No original audio detected; inserting silence under the soundtrack")
 
+    media_audio_flags: list[bool] = []
+    media_durations: list[float] = []
+    video_index = 0
+    for item in media_items:
+        if item.kind == "video":
+            media_audio_flags.append(audio_flags[video_index])
+            media_durations.append(video_durations[video_index])
+            video_index += 1
+        else:
+            media_audio_flags.append(False)
+            media_durations.append(photo_duration)
+
     tracks = find_music(music_dir)
     if not tracks:
-        raise ValueError(f"No MP3 files found in Disc 1 or Disc 2 under {music_dir}")
+        raise ValueError(f"No MP3 files found in {music_dir} or its immediate subdirectories")
     log_message(f"Found {len(tracks)} soundtrack tracks")
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -212,21 +349,32 @@ def merge_videos(
         tmpdir = Path(tmp)
         music_list = tmpdir / "music.txt"
         video_list = tmpdir / "videos.txt"
-        log_message("Writing concat lists")
-        write_concat_list(videos, video_list)
         write_concat_list(tracks, music_list)
-        log_message("Copying video stream without re-encoding")
-
-        command = build_ffmpeg_command(
-            video_list=video_list,
-            videos=videos,
-            audio_flags=audio_flags,
-            durations=durations,
-            music_list=music_list,
-            output=output,
-            original_volume=original_volume,
-            music_volume=music_volume,
-        )
+        if photos:
+            log_message("Rendering timeline because photos are present")
+            command = build_rendered_ffmpeg_command(
+                media_items=media_items,
+                audio_flags=media_audio_flags,
+                durations=media_durations,
+                music_list=music_list,
+                output=output,
+                original_volume=original_volume,
+                music_volume=music_volume,
+            )
+        else:
+            log_message("Writing concat lists")
+            write_concat_list(videos, video_list)
+            log_message("Copying video stream without re-encoding")
+            command = build_ffmpeg_command(
+                video_list=video_list,
+                videos=videos,
+                audio_flags=audio_flags,
+                durations=video_durations,
+                music_list=music_list,
+                output=output,
+                original_volume=original_volume,
+                music_volume=music_volume,
+            )
         if dry_run:
             print(shlex.join(command), file=log)
             return command
@@ -253,7 +401,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--music-dir",
         type=Path,
         default=DEFAULT_MUSIC_DIR,
-        help=f"Soundtrack root containing Disc 1 and Disc 2 (default: {DEFAULT_MUSIC_DIR})",
+        help=f"Soundtrack root scanned for MP3 files one directory deep (default: {DEFAULT_MUSIC_DIR})",
     )
     parser.add_argument(
         "--original-volume",
@@ -266,6 +414,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.85,
         help="Background music volume multiplier (default: 0.85)",
+    )
+    parser.add_argument(
+        "--photo-duration",
+        type=float,
+        default=7.0,
+        help="Seconds each photo should appear in the output (default: 7)",
     )
     parser.add_argument(
         "--dry-run",
@@ -289,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             music_dir=args.music_dir,
             original_volume=args.original_volume,
             music_volume=args.music_volume,
+            photo_duration=args.photo_duration,
             dry_run=args.dry_run,
             quiet=args.quiet,
         )

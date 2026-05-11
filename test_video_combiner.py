@@ -8,6 +8,25 @@ import video_combiner
 
 
 class VideoCombinerTests(unittest.TestCase):
+    def test_finds_media_files_by_mtime_then_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video1 = root / "DJI_0001.MP4"
+            photo = root / "DJI_0002.JPG"
+            video2 = root / "DJI_0003.mp4"
+            ignored = root / "DJI_0004.txt"
+
+            for path in (video2, photo, video1, ignored):
+                path.write_text("x")
+
+            video_combiner.set_mtime(video1, 100)
+            video_combiner.set_mtime(photo, 200)
+            video_combiner.set_mtime(video2, 300)
+
+            media = video_combiner.find_media(root)
+            self.assertEqual([item.path for item in media], [video1, photo, video2])
+            self.assertEqual([item.kind for item in media], ["video", "photo", "video"])
+
     def test_finds_mp4_files_by_mtime_then_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -28,27 +47,28 @@ class VideoCombinerTests(unittest.TestCase):
                 [first, second_a, second_b],
             )
 
-    def test_finds_mp3_music_from_disc_directories(self):
+    def test_finds_mp3_music_from_root_and_one_subdirectory_level(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            disc1 = root / "Disc 1"
-            disc2 = root / "Disc 2"
-            misc = root / "Other"
-            disc1.mkdir()
-            disc2.mkdir()
-            misc.mkdir()
+            album = root / "Album"
+            other = root / "Other"
+            deep = album / "Deep"
+            album.mkdir()
+            other.mkdir()
+            deep.mkdir()
 
-            track_b = disc1 / "02.mp3"
-            track_a = disc1 / "01.mp3"
-            track_c = disc2 / "01.mp3"
-            ignored = misc / "01.mp3"
+            root_track = root / "00.mp3"
+            album_track_b = album / "02.mp3"
+            album_track_a = album / "01.mp3"
+            other_track = other / "01.mp3"
+            deep_ignored = deep / "01.mp3"
 
-            for path in (track_b, track_a, track_c, ignored):
+            for path in (album_track_b, album_track_a, other_track, root_track, deep_ignored):
                 path.write_text("x")
 
             self.assertEqual(
                 video_combiner.find_music(root),
-                [track_a, track_b, track_c],
+                [root_track, album_track_a, album_track_b, other_track],
             )
 
     def test_writes_ffmpeg_concat_list_with_escaped_paths(self):
@@ -137,6 +157,37 @@ class VideoCombinerTests(unittest.TestCase):
         self.assertIn("[3:a:0]volume=0.85[music]", filter_complex)
         self.assertIn("[original][music]amix=inputs=2:duration=first:dropout_transition=2[a]", filter_complex)
 
+    def test_builds_rendered_command_for_interleaved_photo_timeline(self):
+        items = [
+            video_combiner.MediaItem(Path("/tmp/video1.mp4"), "video"),
+            video_combiner.MediaItem(Path("/tmp/photo1.jpg"), "photo"),
+            video_combiner.MediaItem(Path("/tmp/video2.mp4"), "video"),
+        ]
+
+        cmd = video_combiner.build_rendered_ffmpeg_command(
+            media_items=items,
+            audio_flags=[True, False, False],
+            durations=[3.0, 7.0, 4.0],
+            music_list=Path("/tmp/music.txt"),
+            output=Path("/tmp/out.mp4"),
+            original_volume=0.2,
+            music_volume=0.85,
+        )
+
+        filter_complex = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("-loop", cmd)
+        self.assertIn("/tmp/photo1.jpg", cmd)
+        self.assertIn("[1:v:0]scale=1920:1080:force_original_aspect_ratio=decrease", filter_complex)
+        self.assertIn("pad=1920:1080:(ow-iw)/2:(oh-ih)/2", filter_complex)
+        self.assertIn("trim=duration=7", filter_complex)
+        self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000:d=7[a1]", filter_complex)
+        self.assertIn(
+            "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1:unsafe=1[v][original]",
+            filter_complex,
+        )
+        self.assertEqual(cmd[cmd.index("-map") + 1], "[v]")
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "libx264")
+
     def test_detects_audio_stream_with_ffprobe(self):
         with patch("subprocess.run") as run:
             run.return_value.stdout = "0\n"
@@ -186,6 +237,42 @@ class VideoCombinerTests(unittest.TestCase):
             self.assertIn("Writing concat lists", log.getvalue())
             self.assertIn("Running ffmpeg", log.getvalue())
             self.assertIn(f"Output: {root / 'out.mp4'}", log.getvalue())
+
+    def test_merge_uses_rendered_timeline_when_photos_are_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "media"
+            music = root / "music"
+            media.mkdir()
+            (music / "Disc 1").mkdir(parents=True)
+
+            video = media / "CAM_0001.mp4"
+            photo = media / "CAM_0002.jpg"
+            video.write_text("x")
+            photo.write_text("x")
+            (music / "Disc 1" / "01.mp3").write_text("x")
+            video_combiner.set_mtime(video, 100)
+            video_combiner.set_mtime(photo, 200)
+
+            log = StringIO()
+            with (
+                patch("video_combiner.has_audio_stream", return_value=True),
+                patch("video_combiner.get_duration", return_value=3.0),
+                patch("subprocess.run") as run,
+            ):
+                video_combiner.merge_videos(
+                    input_dir=media,
+                    output=root / "out.mp4",
+                    music_dir=music,
+                    photo_duration=7.0,
+                    log=log,
+                )
+
+            command = run.call_args.args[0]
+            self.assertIn("-loop", command)
+            self.assertEqual(command[command.index("-c:v") + 1], "libx264")
+            self.assertIn("Found 1 photo files", log.getvalue())
+            self.assertIn("Rendering timeline because photos are present", log.getvalue())
 
     def test_merge_inserts_silence_when_any_video_lacks_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
