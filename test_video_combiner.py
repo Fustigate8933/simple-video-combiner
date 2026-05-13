@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 import video_combiner
@@ -133,7 +133,8 @@ class VideoCombinerTests(unittest.TestCase):
 
             self.assertEqual(
                 output.read_text(),
-                "file '/tmp/plain.mp4'\nfile '/tmp/it'\\''s fine.mp4'\n",
+                "file 'file:///tmp/plain.mp4'\n"
+                "file 'file:///tmp/it%27s%20fine.mp4'\n",
             )
 
     def test_writes_ffmpeg_concat_list_as_utf8(self):
@@ -145,9 +146,19 @@ class VideoCombinerTests(unittest.TestCase):
 
         write_text.assert_called_once_with(
             output,
-            f"file '{video.resolve()}'\n",
+            f"file '{video.resolve().as_uri()}'\n",
             encoding="utf-8",
         )
+
+    def test_quotes_windows_paths_as_file_uris_for_concat_lists(self):
+        with patch.object(
+            Path,
+            "resolve",
+            return_value=PureWindowsPath(r"C:\Users\liede\Videos\it's fine.mp4"),
+        ):
+            quoted = video_combiner.quote_for_concat_file(Path("ignored.mp4"))
+
+        self.assertEqual(quoted, "'file:///C:/Users/liede/Videos/it%27s%20fine.mp4'")
 
     def test_gets_video_duration_with_ffprobe(self):
         with patch("subprocess.run") as run:

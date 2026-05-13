@@ -200,7 +200,7 @@ def prepare_merge(
 
 def quote_for_concat_file(path: Path) -> str:
     """Quote a path for ffmpeg concat demuxer list files."""
-    return "'" + str(path.resolve()).replace("'", "'\\''") + "'"
+    return "'" + path.resolve().as_uri() + "'"
 
 
 def write_concat_list(paths: Iterable[Path], output: Path) -> None:
