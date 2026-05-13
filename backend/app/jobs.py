@@ -27,7 +27,12 @@ class JobCancelledError(RuntimeError):
     pass
 
 
-def run_command(command: list[str], logs: list[str], stop_event: threading.Event) -> None:
+def run_command(
+    command: list[str],
+    logs: list[str],
+    stop_event: threading.Event,
+    working_dir: Path | None = None,
+) -> None:
     logs.append(f"Running {shlex.join(command)}")
     process = subprocess.Popen(
         command,
@@ -36,6 +41,7 @@ def run_command(command: list[str], logs: list[str], stop_event: threading.Event
         text=True,
         encoding="utf-8",
         errors="replace",
+        cwd=str(working_dir) if working_dir else None,
     )
     assert process.stdout is not None
 
@@ -130,7 +136,7 @@ class JobManager:
                 photo_duration=job.options.photo_duration,
             )
             job.logs.extend(prepared.messages)
-            run_command(prepared.command, job.logs, job.stop_event)
+            run_command(prepared.command, job.logs, job.stop_event, prepared.working_dir)
             if job.stop_event.is_set():
                 job.status = "cancelled"
                 job.error = "Job cancelled"

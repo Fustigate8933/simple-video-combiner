@@ -122,6 +122,7 @@ class VideoCombinerTests(unittest.TestCase):
             self.assertEqual(prepared.summary.mp4_count, 1)
             self.assertEqual(prepared.summary.image_count, 0)
             self.assertEqual(prepared.summary.music_count, 1)
+            self.assertEqual(prepared.working_dir, media)
             filter_script = Path(
                 prepared.command[prepared.command.index("-filter_complex_script") + 1]
             )
@@ -312,6 +313,7 @@ class VideoCombinerTests(unittest.TestCase):
             music_volume=0.85,
         )
 
+        self.assertEqual(cmd[:2], ["ffmpeg", "-y"])
         filter_complex = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn("-loop", cmd)
         self.assertIn("/tmp/photo1.jpg", cmd)
@@ -432,6 +434,8 @@ class VideoCombinerTests(unittest.TestCase):
 
             command = run.call_args.args[0]
             self.assertIn("-loop", command)
+            self.assertIn("CAM_0001.mp4", command)
+            self.assertNotIn(str(video), command)
             self.assertEqual(command[command.index("-c:v") + 1], "libx264")
             self.assertIn("Found 1 photo files", log.getvalue())
             self.assertIn("Rendering timeline because photos are present", log.getvalue())

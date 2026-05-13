@@ -40,6 +40,7 @@ class PreparedMerge:
     command: list[str]
     messages: list[str]
     summary: ScanSummary
+    working_dir: Path | None = None
 
 
 def set_mtime(path: Path, timestamp: float) -> None:
@@ -164,7 +165,10 @@ def prepare_merge(
     if photos:
         messages.append("Rendering timeline because photos are present")
         command = build_rendered_ffmpeg_command(
-            media_items=media_items,
+            media_items=[
+                MediaItem(Path(item.path.name), item.kind)
+                for item in media_items
+            ],
             audio_flags=media_audio_flags,
             durations=media_durations,
             music_list=music_list,
@@ -173,13 +177,14 @@ def prepare_merge(
             music_volume=music_volume,
         )
         command = externalize_filter_complex(command, temp_dir / "render-filter.txt")
+        working_dir = input_dir
     else:
         messages.append("Writing concat lists")
         write_concat_list(videos, video_list)
         messages.append("Copying video stream without re-encoding")
         command = build_ffmpeg_command(
             video_list=video_list,
-            videos=videos,
+            videos=[Path(video.name) for video in videos],
             audio_flags=audio_flags,
             durations=video_durations,
             music_list=music_list,
@@ -188,6 +193,7 @@ def prepare_merge(
             music_volume=music_volume,
         )
         command = externalize_filter_complex(command, temp_dir / "audio-filter.txt")
+        working_dir = input_dir
 
     return PreparedMerge(
         command=command,
@@ -197,6 +203,7 @@ def prepare_merge(
             image_count=len(photos),
             music_count=len(tracks),
         ),
+        working_dir=working_dir,
     )
 
 
@@ -404,19 +411,19 @@ def build_rendered_ffmpeg_command(
     filter_parts: list[str] = []
     concat_inputs: list[str] = []
     for index, (item, has_audio, duration) in enumerate(zip(media_items, audio_flags, durations)):
-        if item.kind == "photo":
-            filter_parts.append(
+        filter_parts.append(
+            (
                 f"[{index}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,"
                 "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
                 "setsar=1,fps=30,format=yuv420p,"
                 f"trim=duration={duration:g},setpts=PTS-STARTPTS[v{index}]"
-            )
-        else:
-            filter_parts.append(
+                if item.kind == "photo"
+                else
                 f"[{index}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,"
                 "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
                 f"setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
             )
+        )
 
         if has_audio:
             filter_parts.append(
@@ -434,8 +441,7 @@ def build_rendered_ffmpeg_command(
     music_index = len(media_items)
     filter_parts.extend(
         [
-            "".join(concat_inputs)
-            + f"concat=n={len(media_items)}:v=1:a=1:unsafe=1[v][original]",
+            "".join(concat_inputs) + f"concat=n={len(media_items)}:v=1:a=1:unsafe=1[v][original]",
             f"[{music_index}:a:0]volume={music_volume}[music]",
             "[original][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
         ]
@@ -500,7 +506,7 @@ def merge_videos(
 
         output.parent.mkdir(parents=True, exist_ok=True)
         log_message("Running ffmpeg")
-        run_checked(prepared.command)
+        run_checked(prepared.command, cwd=prepared.working_dir)
         log_message(f"Output: {output}")
         return prepared.command
 

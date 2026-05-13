@@ -212,7 +212,7 @@ def test_job_lifecycle_succeeds_with_fake_runner(tmp_path: Path):
     (source_dir / "clip.mp4").write_bytes(b"")
     (music_dir / "track.mp3").write_bytes(b"")
 
-    def fake_run_command(command: list[str], logs: list[str], stop_event) -> None:
+    def fake_run_command(command: list[str], logs: list[str], stop_event, working_dir=None) -> None:
         logs.append(f"Running {' '.join(command[:1])}")
 
     with (
@@ -277,7 +277,7 @@ def test_cancel_job_eventually_reaches_cancelled_state(tmp_path: Path):
 
     from backend.app.jobs import JobCancelledError, job_manager
 
-    def fake_run_command(command: list[str], logs: list[str], stop_event) -> None:
+    def fake_run_command(command: list[str], logs: list[str], stop_event, working_dir=None) -> None:
         while not stop_event.is_set():
             time.sleep(0.01)
         raise JobCancelledError("Job cancelled")
