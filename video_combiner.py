@@ -28,6 +28,20 @@ class MediaItem:
     kind: str
 
 
+@dataclass(frozen=True)
+class ScanSummary:
+    mp4_count: int
+    image_count: int
+    music_count: int
+
+
+@dataclass(frozen=True)
+class PreparedMerge:
+    command: list[str]
+    messages: list[str]
+    summary: ScanSummary
+
+
 def set_mtime(path: Path, timestamp: float) -> None:
     """Set access and modification time; used by tests and harmless for callers."""
     os.utime(path, (timestamp, timestamp))
@@ -82,6 +96,108 @@ def find_music(music_dir: Path) -> list[Path]:
     )
 
 
+def scan_inputs(input_dir: Path, music_dir: Path) -> ScanSummary:
+    media_items = find_media(input_dir)
+    tracks = find_music(music_dir)
+    return ScanSummary(
+        mp4_count=sum(1 for item in media_items if item.kind == "video"),
+        image_count=sum(1 for item in media_items if item.kind == "photo"),
+        music_count=len(tracks),
+    )
+
+
+def prepare_merge(
+    *,
+    input_dir: Path,
+    output: Path,
+    music_dir: Path,
+    temp_dir: Path,
+    original_volume: float,
+    music_volume: float,
+    photo_duration: float,
+) -> PreparedMerge:
+    messages: list[str] = []
+    media_items = find_media(input_dir)
+    videos = [item.path for item in media_items if item.kind == "video"]
+    photos = [item.path for item in media_items if item.kind == "photo"]
+    if not media_items:
+        raise ValueError(f"No MP4, JPG, JPEG, or PNG files found in {input_dir}")
+
+    messages.append(f"Found {len(videos)} MP4 files")
+    if photos:
+        messages.append(f"Found {len(photos)} photo files")
+
+    audio_flags = [has_audio_stream(video) for video in videos]
+    audio_count = sum(audio_flags)
+    video_durations = [get_duration(video) for video in videos]
+    if videos and audio_count == len(videos):
+        messages.append("Original audio detected; mixing it under the soundtrack")
+    elif audio_count:
+        messages.append(
+            f"{audio_count} of {len(videos)} videos have audio; "
+            "inserting silence for clips without audio"
+        )
+    else:
+        messages.append("No original audio detected; inserting silence under the soundtrack")
+
+    media_audio_flags: list[bool] = []
+    media_durations: list[float] = []
+    video_index = 0
+    for item in media_items:
+        if item.kind == "video":
+            media_audio_flags.append(audio_flags[video_index])
+            media_durations.append(video_durations[video_index])
+            video_index += 1
+        else:
+            media_audio_flags.append(False)
+            media_durations.append(photo_duration)
+
+    tracks = find_music(music_dir)
+    if not tracks:
+        raise ValueError(f"No MP3 files found in {music_dir} or its immediate subdirectories")
+    messages.append(f"Found {len(tracks)} soundtrack tracks")
+
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    music_list = temp_dir / "music.txt"
+    video_list = temp_dir / "videos.txt"
+    write_concat_list(tracks, music_list)
+    if photos:
+        messages.append("Rendering timeline because photos are present")
+        command = build_rendered_ffmpeg_command(
+            media_items=media_items,
+            audio_flags=media_audio_flags,
+            durations=media_durations,
+            music_list=music_list,
+            output=output,
+            original_volume=original_volume,
+            music_volume=music_volume,
+        )
+    else:
+        messages.append("Writing concat lists")
+        write_concat_list(videos, video_list)
+        messages.append("Copying video stream without re-encoding")
+        command = build_ffmpeg_command(
+            video_list=video_list,
+            videos=videos,
+            audio_flags=audio_flags,
+            durations=video_durations,
+            music_list=music_list,
+            output=output,
+            original_volume=original_volume,
+            music_volume=music_volume,
+        )
+
+    return PreparedMerge(
+        command=command,
+        messages=messages,
+        summary=ScanSummary(
+            mp4_count=len(videos),
+            image_count=len(photos),
+            music_count=len(tracks),
+        ),
+    )
+
+
 def quote_for_concat_file(path: Path) -> str:
     """Quote a path for ffmpeg concat demuxer list files."""
     return "'" + str(path.resolve()).replace("'", "'\\''") + "'"
@@ -89,7 +205,7 @@ def quote_for_concat_file(path: Path) -> str:
 
 def write_concat_list(paths: Iterable[Path], output: Path) -> None:
     lines = [f"file {quote_for_concat_file(path)}\n" for path in paths]
-    output.write_text("".join(lines))
+    output.write_text("".join(lines), encoding="utf-8")
 
 
 def has_audio_stream(video: Path) -> bool:
@@ -302,87 +418,27 @@ def merge_videos(
         if not quiet:
             print(message, file=log)
 
-    media_items = find_media(input_dir)
-    videos = [item.path for item in media_items if item.kind == "video"]
-    photos = [item.path for item in media_items if item.kind == "photo"]
-    if not media_items:
-        raise ValueError(f"No MP4, JPG, JPEG, or PNG files found in {input_dir}")
-    if not videos:
-        log_message("Found 0 MP4 files")
-    else:
-        log_message(f"Found {len(videos)} MP4 files")
-    if photos:
-        log_message(f"Found {len(photos)} photo files")
-    audio_flags = [has_audio_stream(video) for video in videos]
-    audio_count = sum(audio_flags)
-    video_durations = [get_duration(video) for video in videos]
-    if videos and audio_count == len(videos):
-        log_message("Original audio detected; mixing it under the soundtrack")
-    elif audio_count:
-        log_message(
-            f"{audio_count} of {len(videos)} videos have audio; "
-            "inserting silence for clips without audio"
-        )
-    else:
-        log_message("No original audio detected; inserting silence under the soundtrack")
-
-    media_audio_flags: list[bool] = []
-    media_durations: list[float] = []
-    video_index = 0
-    for item in media_items:
-        if item.kind == "video":
-            media_audio_flags.append(audio_flags[video_index])
-            media_durations.append(video_durations[video_index])
-            video_index += 1
-        else:
-            media_audio_flags.append(False)
-            media_durations.append(photo_duration)
-
-    tracks = find_music(music_dir)
-    if not tracks:
-        raise ValueError(f"No MP3 files found in {music_dir} or its immediate subdirectories")
-    log_message(f"Found {len(tracks)} soundtrack tracks")
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-
     with tempfile.TemporaryDirectory(prefix="video-combiner-") as tmp:
-        tmpdir = Path(tmp)
-        music_list = tmpdir / "music.txt"
-        video_list = tmpdir / "videos.txt"
-        write_concat_list(tracks, music_list)
-        if photos:
-            log_message("Rendering timeline because photos are present")
-            command = build_rendered_ffmpeg_command(
-                media_items=media_items,
-                audio_flags=media_audio_flags,
-                durations=media_durations,
-                music_list=music_list,
-                output=output,
-                original_volume=original_volume,
-                music_volume=music_volume,
-            )
-        else:
-            log_message("Writing concat lists")
-            write_concat_list(videos, video_list)
-            log_message("Copying video stream without re-encoding")
-            command = build_ffmpeg_command(
-                video_list=video_list,
-                videos=videos,
-                audio_flags=audio_flags,
-                durations=video_durations,
-                music_list=music_list,
-                output=output,
-                original_volume=original_volume,
-                music_volume=music_volume,
-            )
+        prepared = prepare_merge(
+            input_dir=input_dir,
+            output=output,
+            music_dir=music_dir,
+            temp_dir=Path(tmp),
+            original_volume=original_volume,
+            music_volume=music_volume,
+            photo_duration=photo_duration,
+        )
+        for message in prepared.messages:
+            log_message(message)
         if dry_run:
-            print(shlex.join(command), file=log)
-            return command
+            print(shlex.join(prepared.command), file=log)
+            return prepared.command
 
+        output.parent.mkdir(parents=True, exist_ok=True)
         log_message("Running ffmpeg")
-        subprocess.run(command, check=True)
+        subprocess.run(prepared.command, check=True)
         log_message(f"Output: {output}")
-        return command
+        return prepared.command
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

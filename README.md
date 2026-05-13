@@ -79,3 +79,36 @@ Preview the generated `ffmpeg` command without producing a video:
 ```bash
 python video_combiner.py /path/to/videos --dry-run
 ```
+
+## Desktop App Development
+
+The Electron app is a local UI around the Python combiner. Version 1 expects
+Python 3.10+ and `ffmpeg`/`ffprobe` on `PATH`; they are not bundled yet.
+
+Install Python backend dependencies:
+
+```bash
+python -m pip install -r backend/requirements.txt
+```
+
+Install frontend dependencies:
+
+```bash
+npm install
+```
+
+If `npm install` fails because of a broken local npm cache or shell resolution,
+this environment worked with:
+
+```bash
+npm_config_script_shell=/usr/bin/sh npm install --cache /tmp/kiwi-merge-npm-cache
+```
+
+Run the desktop app in development:
+
+```bash
+npm run app:dev
+```
+
+The Electron main process starts the FastAPI backend on `127.0.0.1:8765`.
+The Vue renderer runs through Vite on `127.0.0.1:5173`.

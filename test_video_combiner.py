@@ -71,6 +71,58 @@ class VideoCombinerTests(unittest.TestCase):
                 [root_track, album_track_a, album_track_b, other_track],
             )
 
+    def test_scans_inputs_with_media_and_music_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "media"
+            music = root / "music"
+            media.mkdir()
+            music.mkdir()
+
+            (media / "clip.mp4").write_text("x")
+            (media / "photo.jpg").write_text("x")
+            (media / "notes.txt").write_text("x")
+            (music / "01.mp3").write_text("x")
+
+            summary = video_combiner.scan_inputs(media, music)
+
+            self.assertEqual(summary.mp4_count, 1)
+            self.assertEqual(summary.image_count, 1)
+            self.assertEqual(summary.music_count, 1)
+
+    def test_prepares_merge_command_without_running_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "media"
+            music = root / "music"
+            media.mkdir()
+            music.mkdir()
+            video = media / "clip.mp4"
+            track = music / "01.mp3"
+            video.write_text("x")
+            track.write_text("x")
+
+            with (
+                patch("video_combiner.has_audio_stream", return_value=False),
+                patch("video_combiner.get_duration", return_value=5.0),
+            ):
+                prepared = video_combiner.prepare_merge(
+                    input_dir=media,
+                    output=root / "out.mp4",
+                    music_dir=music,
+                    temp_dir=root / "tmp",
+                    original_volume=0.2,
+                    music_volume=0.85,
+                    photo_duration=7.0,
+                )
+
+            self.assertIn("Found 1 MP4 files", prepared.messages)
+            self.assertIn("Found 1 soundtrack tracks", prepared.messages)
+            self.assertIn("-filter_complex", prepared.command)
+            self.assertEqual(prepared.summary.mp4_count, 1)
+            self.assertEqual(prepared.summary.image_count, 0)
+            self.assertEqual(prepared.summary.music_count, 1)
+
     def test_writes_ffmpeg_concat_list_with_escaped_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "list.txt"
@@ -83,6 +135,19 @@ class VideoCombinerTests(unittest.TestCase):
                 output.read_text(),
                 "file '/tmp/plain.mp4'\nfile '/tmp/it'\\''s fine.mp4'\n",
             )
+
+    def test_writes_ffmpeg_concat_list_as_utf8(self):
+        output = Path("/tmp/清單.txt")
+        video = Path("/tmp/影片一.mp4")
+
+        with patch.object(Path, "write_text", autospec=True) as write_text:
+            video_combiner.write_concat_list([video], output)
+
+        write_text.assert_called_once_with(
+            output,
+            f"file '{video.resolve()}'\n",
+            encoding="utf-8",
+        )
 
     def test_gets_video_duration_with_ffprobe(self):
         with patch("subprocess.run") as run:
@@ -237,6 +302,20 @@ class VideoCombinerTests(unittest.TestCase):
             self.assertIn("Writing concat lists", log.getvalue())
             self.assertIn("Running ffmpeg", log.getvalue())
             self.assertIn(f"Output: {root / 'out.mp4'}", log.getvalue())
+
+    def test_merge_does_not_create_output_parent_when_inputs_are_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "missing-parent" / "out.mp4"
+
+            with self.assertRaises(ValueError):
+                video_combiner.merge_videos(
+                    input_dir=root / "missing-videos",
+                    output=output,
+                    music_dir=root / "missing-music",
+                )
+
+            self.assertFalse(output.parent.exists())
 
     def test_merge_uses_rendered_timeline_when_photos_are_present(self):
         with tempfile.TemporaryDirectory() as tmp:
