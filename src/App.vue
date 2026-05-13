@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import LogPanel from './components/LogPanel.vue'
 import OptionPanel from './components/OptionPanel.vue'
@@ -20,25 +20,34 @@ import {
   type MergeOptions,
   type ScanResponse,
 } from './lib/api'
+import { translate, type MessageKey } from './lib/i18n'
+import { loadPreferences, savePreferences, type Language } from './lib/preferences'
 
+const savedPreferences = loadPreferences()
+const localStorageRef = globalThis.localStorage ?? null
+
+const language = ref<Language>(savedPreferences.language)
 const form = reactive({
-  sourceDir: '',
-  outputFile: '',
-  musicDir: '',
-  photoDuration: 7,
-  originalVolume: 0.2,
-  musicVolume: 0.85,
+  sourceDir: savedPreferences.sourceDir,
+  outputFile: savedPreferences.outputFile,
+  musicDir: savedPreferences.musicDir,
+  photoDuration: savedPreferences.photoDuration,
+  originalVolume: savedPreferences.originalVolume,
+  musicVolume: savedPreferences.musicVolume,
 })
 
 const stats = ref<ScanResponse | null>(null)
 const logs = ref<string[]>([])
-const uiMessage = ref('Choose your folders, scan them, then start the merge.')
-const lastScanLabel = ref('Run a scan after choosing your folders.')
 const errorMessage = ref<string | null>(null)
 const activeAction = ref<'scan' | 'dry-run' | 'start' | 'cancel' | null>(null)
 const jobId = ref<string | null>(null)
 const jobStatus = ref('idle')
 const subscription = ref<JobSubscription | null>(null)
+const uiMessageKey = ref<MessageKey>('defaultMessage')
+const lastScanMode = ref<'none' | 'scan' | 'dry-run'>('none')
+const lastScanSummary = ref<ScanResponse | null>(null)
+
+const t = (key: MessageKey) => translate(language.value, key)
 
 const options = computed<MergeFormOptions>({
   get: () => ({
@@ -57,6 +66,35 @@ const hasPathInputs = computed(() => Boolean(form.sourceDir && form.musicDir))
 const hasAllInputs = computed(() => Boolean(form.sourceDir && form.outputFile && form.musicDir))
 const isRunning = computed(() => jobStatus.value === 'pending' || jobStatus.value === 'running')
 const isBusy = computed(() => activeAction.value !== null || isRunning.value)
+const uiMessage = computed(() => t(uiMessageKey.value))
+const lastScanLabel = computed(() => {
+  if (!lastScanSummary.value || lastScanMode.value === 'none') {
+    return t('runScanPrompt')
+  }
+
+  const { mp4_count, image_count, music_count } = lastScanSummary.value
+  if (language.value === 'zh-TW') {
+    if (lastScanMode.value === 'dry-run') {
+      return `模擬執行已檢查 ${mp4_count} 部影片、${image_count} 張圖片、${music_count} 首音軌。`
+    }
+
+    return `找到 ${mp4_count} 部影片、${image_count} 張圖片、${music_count} 首音軌。`
+  }
+
+  if (lastScanMode.value === 'dry-run') {
+    return `Dry run checked ${mp4_count} videos, ${image_count} images, ${music_count} tracks.`
+  }
+
+  return `Found ${mp4_count} videos, ${image_count} images, ${music_count} tracks.`
+})
+const statusLabels = computed(() => ({
+  idle: t('statusIdle'),
+  pending: t('statusPending'),
+  running: t('statusRunning'),
+  succeeded: t('statusSucceeded'),
+  failed: t('statusFailed'),
+  cancelled: t('statusCancelled'),
+}))
 
 function toMergeOptions(): MergeOptions {
   return {
@@ -101,11 +139,11 @@ function startSubscription(currentJobId: string) {
     (status) => {
       jobStatus.value = status
       if (status === 'succeeded') {
-        uiMessage.value = 'Merge completed.'
+        uiMessageKey.value = 'mergeCompletedMessage'
       } else if (status === 'failed') {
-        uiMessage.value = 'Merge failed.'
+        uiMessageKey.value = 'mergeFailedMessage'
       } else if (status === 'cancelled') {
-        uiMessage.value = 'Merge cancelled.'
+        uiMessageKey.value = 'mergeCancelledMessage'
       }
     },
     (line) => {
@@ -123,7 +161,7 @@ function startSubscription(currentJobId: string) {
         return
       }
 
-      const message = error instanceof ApiError ? error.detail : 'Live job updates stopped unexpectedly'
+      const message = error instanceof ApiError ? error.detail : t('liveUpdatesStopped')
       errorMessage.value = message
       appendLog(message)
     })
@@ -148,7 +186,7 @@ function handleError(error: unknown, fallback: string) {
 
 async function runScan() {
   if (!hasPathInputs.value) {
-    errorMessage.value = 'Source and music directories are required before scanning.'
+    errorMessage.value = t('scanValidationError')
     return
   }
 
@@ -158,13 +196,14 @@ async function runScan() {
   try {
     const response = await scan(form.sourceDir.trim(), form.musicDir.trim())
     stats.value = response
-    lastScanLabel.value = `Found ${response.mp4_count} videos, ${response.image_count} images, ${response.music_count} tracks.`
-    uiMessage.value = 'Scan complete.'
+    lastScanSummary.value = response
+    lastScanMode.value = 'scan'
+    uiMessageKey.value = 'scanCompleteMessage'
     appendLog(
       `Scan complete: ${response.mp4_count} videos, ${response.image_count} images, ${response.music_count} tracks.`,
     )
   } catch (error) {
-    handleError(error, 'Scan failed')
+    handleError(error, t('scanFailedFallback'))
   } finally {
     activeAction.value = null
   }
@@ -172,7 +211,7 @@ async function runScan() {
 
 async function runDryRun() {
   if (!hasAllInputs.value) {
-    errorMessage.value = 'Source, output, and music paths are required before a dry run.'
+    errorMessage.value = t('dryRunValidationError')
     return
   }
 
@@ -182,15 +221,16 @@ async function runDryRun() {
   try {
     const response = await dryRun(toMergeOptions())
     stats.value = response.summary
-    lastScanLabel.value = `Dry run checked ${response.summary.mp4_count} videos, ${response.summary.image_count} images, ${response.summary.music_count} tracks.`
-    uiMessage.value = 'Dry run complete.'
+    lastScanSummary.value = response.summary
+    lastScanMode.value = 'dry-run'
+    uiMessageKey.value = 'dryRunCompleteMessage'
     pushLogs([
-      'Dry run',
+      t('dryRunHeader'),
       ...response.messages,
-      `Command: ${response.command_text}`,
+      `${t('commandLabel')}: ${response.command_text}`,
     ])
   } catch (error) {
-    handleError(error, 'Dry run failed')
+    handleError(error, t('dryRunFailedFallback'))
   } finally {
     activeAction.value = null
   }
@@ -198,7 +238,7 @@ async function runDryRun() {
 
 async function runStartJob() {
   if (!hasAllInputs.value) {
-    errorMessage.value = 'Source, output, and music paths are required before starting a merge.'
+    errorMessage.value = t('startValidationError')
     return
   }
 
@@ -209,10 +249,10 @@ async function runStartJob() {
   try {
     const response = await startJob(toMergeOptions())
     setJobState(response)
-    uiMessage.value = 'Merge started.'
+    uiMessageKey.value = 'mergeStartedMessage'
     startSubscription(response.job_id)
   } catch (error) {
-    handleError(error, 'Merge failed to start')
+    handleError(error, t('startFailedFallback'))
   } finally {
     activeAction.value = null
   }
@@ -229,9 +269,9 @@ async function runCancel() {
   try {
     const response = await cancelJob(jobId.value)
     setJobState(response)
-    uiMessage.value = response.status === 'cancelled' ? 'Merge cancelled.' : 'Cancellation requested.'
+    uiMessageKey.value = 'mergeCancelledMessage'
   } catch (error) {
-    handleError(error, 'Unable to cancel the active merge')
+    handleError(error, t('cancelFailedFallback'))
   } finally {
     activeAction.value = null
   }
@@ -258,6 +298,22 @@ async function pickOutput() {
   form.outputFile = selected
 }
 
+watch(
+  () => ({
+    language: language.value,
+    sourceDir: form.sourceDir,
+    outputFile: form.outputFile,
+    musicDir: form.musicDir,
+    photoDuration: form.photoDuration,
+    originalVolume: form.originalVolume,
+    musicVolume: form.musicVolume,
+  }),
+  (next) => {
+    savePreferences(localStorageRef, next)
+  },
+  { deep: true },
+)
+
 onBeforeUnmount(() => {
   resetSubscription()
 })
@@ -269,21 +325,32 @@ onBeforeUnmount(() => {
       <section class="rounded-md border border-[#d9e2cf] bg-white p-5 sm:p-6">
         <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <h1 class="mt-2 text-2xl font-semibold sm:text-3xl">Video merge control panel</h1>
+            <h1 class="mt-2 text-2xl font-semibold sm:text-3xl">{{ t('appTitle') }}</h1>
             <p class="mt-2 max-w-2xl text-sm text-[#66735e]">{{ uiMessage }}</p>
           </div>
-          <!-- <div class="flex shrink-0 items-center gap-3 self-start"> -->
-          <!--   <span -->
-          <!--     class="inline-flex min-h-11 items-center rounded-full border px-4 text-sm font-medium" -->
-          <!--     :class=" -->
-          <!--       isRunning -->
-          <!--         ? 'border-kiwi-200 bg-kiwi-50 text-kiwi-800' -->
-          <!--         : 'border-[#d7dfcc] bg-[#f8faf4] text-[#66735e]' -->
-          <!--     " -->
-          <!--   > -->
-          <!--     {{ isRunning ? 'Merge running' : 'Ready' }} -->
-          <!--   </span> -->
-          <!-- </div> -->
+          <div class="flex items-center gap-3 self-start">
+            <span class="text-xs font-medium uppercase tracking-wide text-[#66735e]">
+              {{ t('languageLabel') }}
+            </span>
+            <div class="inline-flex rounded-md border border-[#d9e2cf] bg-[#f8faf4] p-1">
+              <button
+                type="button"
+                class="rounded-md px-3 py-1.5 text-sm transition"
+                :class="language === 'en' ? 'bg-white text-[#23301e]' : 'text-[#66735e] hover:text-[#23301e]'"
+                @click="language = 'en'"
+              >
+                EN
+              </button>
+              <button
+                type="button"
+                class="rounded-md px-3 py-1.5 text-sm transition"
+                :class="language === 'zh-TW' ? 'bg-white text-[#23301e]' : 'text-[#66735e] hover:text-[#23301e]'"
+                @click="language = 'zh-TW'"
+              >
+                繁中
+              </button>
+            </div>
+          </div>
         </div>
 
         <p
@@ -300,37 +367,48 @@ onBeforeUnmount(() => {
             <div class="space-y-4">
               <PathField
                 v-model="form.sourceDir"
-                label="Source folder"
-                placeholder="/path/to/source-media"
-                button-label="Browse"
-                help="Choose the folder with videos and still images."
+                :label="t('sourceFolderLabel')"
+                :placeholder="t('sourceFolderPlaceholder')"
+                :button-label="t('browseButton')"
+                :help="t('sourceFolderHelp')"
                 :disabled="isBusy"
                 @pick="pickDirectory('sourceDir')"
               />
 
               <PathField
                 v-model="form.outputFile"
-                label="Output MP4"
-                placeholder="/path/to/output.mp4"
-                button-label="Save as"
-                help="Pick the final merged MP4 destination."
+                :label="t('outputFileLabel')"
+                :placeholder="t('outputFilePlaceholder')"
+                :button-label="t('saveAsButton')"
+                :help="t('outputFileHelp')"
                 :disabled="isBusy"
                 @pick="pickOutput"
               />
 
               <PathField
                 v-model="form.musicDir"
-                label="Music folder"
-                placeholder="/path/to/music"
-                button-label="Browse"
-                help="Kiwi Merge scans this folder for MP3 tracks."
+                :label="t('musicFolderLabel')"
+                :placeholder="t('musicFolderPlaceholder')"
+                :button-label="t('browseButton')"
+                :help="t('musicFolderHelp')"
                 :disabled="isBusy"
                 @pick="pickDirectory('musicDir')"
               />
             </div>
           </div>
 
-          <OptionPanel v-model:options="options" :disabled="isBusy" />
+          <OptionPanel
+            v-model:options="options"
+            :disabled="isBusy"
+            :title="t('optionsTitle')"
+            :description="t('optionsHelp')"
+            :photo-duration-label="t('photoDurationLabel')"
+            :photo-duration-help="t('photoDurationHelp')"
+            :original-audio-label="t('originalAudioLabel')"
+            :original-audio-help="t('originalAudioHelp')"
+            :music-volume-label="t('musicVolumeLabel')"
+            :music-volume-help="t('musicVolumeHelp')"
+          />
 
           <section class="rounded-md border border-[#d9e2cf] bg-white p-5">
             <div class="flex flex-wrap gap-3">
@@ -340,7 +418,7 @@ onBeforeUnmount(() => {
                 :disabled="!hasAllInputs || isBusy"
                 @click="runStartJob"
               >
-                {{ activeAction === 'start' ? 'Starting...' : 'Start merge' }}
+                {{ activeAction === 'start' ? t('startingMerge') : t('startMerge') }}
               </button>
 
               <button
@@ -349,7 +427,7 @@ onBeforeUnmount(() => {
                 :disabled="!hasAllInputs || isBusy"
                 @click="runDryRun"
               >
-                {{ activeAction === 'dry-run' ? 'Running dry run...' : 'Dry run' }}
+                {{ activeAction === 'dry-run' ? t('runningDryRun') : t('dryRun') }}
               </button>
 
               <button
@@ -358,7 +436,7 @@ onBeforeUnmount(() => {
                 :disabled="!hasPathInputs || isBusy"
                 @click="runScan"
               >
-                {{ activeAction === 'scan' ? 'Scanning...' : 'Rescan' }}
+                {{ activeAction === 'scan' ? t('scanningAction') : t('rescan') }}
               </button>
 
               <button
@@ -367,7 +445,7 @@ onBeforeUnmount(() => {
                 :disabled="!isRunning || activeAction === 'cancel'"
                 @click="runCancel"
               >
-                {{ activeAction === 'cancel' ? 'Cancelling...' : 'Cancel' }}
+                {{ activeAction === 'cancel' ? t('cancelling') : t('cancel') }}
               </button>
             </div>
           </section>
@@ -378,9 +456,32 @@ onBeforeUnmount(() => {
             :stats="stats"
             :is-scanning="activeAction === 'scan'"
             :last-scan-label="lastScanLabel"
+            :title="t('detectedMediaTitle')"
+            :description="t('detectedMediaHelp')"
+            :ready-label="t('ready')"
+            :scanning-label="t('scanning')"
+            :video-label="t('videosLabel')"
+            :image-label="t('imagesLabel')"
+            :track-label="t('tracksLabel')"
           />
-          <ProgressPanel :status="jobStatus" :job-id="jobId" :error="errorMessage" />
-          <LogPanel :logs="logs" />
+          <ProgressPanel
+            :status="jobStatus"
+            :job-id="jobId"
+            :error="errorMessage"
+            :title="t('progressTitle')"
+            :description="t('progressHelp')"
+            :current-state-label="t('currentStateLabel')"
+            :job-id-label="t('jobIdLabel')"
+            :not-started-label="t('notStarted')"
+            :status-labels="statusLabels"
+          />
+          <LogPanel
+            :logs="logs"
+            :title="t('logsTitle')"
+            :description="t('logsHelp')"
+            :lines-label="t('linesLabel')"
+            :empty-label="t('logsEmpty')"
+          />
         </section>
       </div>
     </div>

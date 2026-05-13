@@ -8,6 +8,14 @@ export interface MergeFormOptions {
 const props = defineProps<{
   options: MergeFormOptions
   disabled?: boolean
+  title: string
+  description: string
+  photoDurationLabel: string
+  photoDurationHelp: string
+  originalAudioLabel: string
+  originalAudioHelp: string
+  musicVolumeLabel: string
+  musicVolumeHelp: string
 }>()
 
 const emit = defineEmits<{
@@ -27,15 +35,15 @@ function updateOption<K extends keyof MergeFormOptions>(key: K, value: string) {
   <section class="rounded-md border border-[#d9e2cf] bg-white p-5">
     <div class="flex items-start justify-between gap-3">
       <div>
-        <p class="text-sm font-semibold text-[#23301e]">Merge options</p>
-        <p class="mt-1 text-xs text-[#66735e]">Keep the defaults unless you need a different pace or mix.</p>
+        <p class="text-sm font-semibold text-[#23301e]">{{ title }}</p>
+        <p class="mt-1 text-xs text-[#66735e]">{{ description }}</p>
       </div>
     </div>
 
     <div class="mt-4 grid gap-4 sm:grid-cols-3">
       <label class="block">
         <span class="mb-2 block text-xs font-medium uppercase tracking-wide text-[#66735e]">
-          Photo duration
+          {{ photoDurationLabel }}
         </span>
         <input
           :value="options.photoDuration"
@@ -46,12 +54,12 @@ function updateOption<K extends keyof MergeFormOptions>(key: K, value: string) {
           class="min-h-11 w-full rounded-md border border-[#d9e2cf] bg-white px-3 py-2 text-sm text-[#23301e] outline-none transition focus:border-kiwi-400 focus:ring-2 focus:ring-kiwi-100 disabled:cursor-not-allowed disabled:bg-[#f4f7ed]"
           @input="updateOption('photoDuration', ($event.target as HTMLInputElement).value)"
         />
-        <p class="mt-2 text-xs text-[#66735e]">Seconds shown for each still image.</p>
+        <p class="mt-2 text-xs text-[#66735e]">{{ photoDurationHelp }}</p>
       </label>
 
       <label class="block">
         <span class="mb-2 block text-xs font-medium uppercase tracking-wide text-[#66735e]">
-          Original audio
+          {{ originalAudioLabel }}
         </span>
         <input
           :value="options.originalVolume"
@@ -63,12 +71,12 @@ function updateOption<K extends keyof MergeFormOptions>(key: K, value: string) {
           class="min-h-11 w-full rounded-md border border-[#d9e2cf] bg-white px-3 py-2 text-sm text-[#23301e] outline-none transition focus:border-kiwi-400 focus:ring-2 focus:ring-kiwi-100 disabled:cursor-not-allowed disabled:bg-[#f4f7ed]"
           @input="updateOption('originalVolume', ($event.target as HTMLInputElement).value)"
         />
-        <p class="mt-2 text-xs text-[#66735e]">Volume level for the source clips.</p>
+        <p class="mt-2 text-xs text-[#66735e]">{{ originalAudioHelp }}</p>
       </label>
 
       <label class="block">
         <span class="mb-2 block text-xs font-medium uppercase tracking-wide text-[#66735e]">
-          Music volume
+          {{ musicVolumeLabel }}
         </span>
         <input
           :value="options.musicVolume"
@@ -80,7 +88,7 @@ function updateOption<K extends keyof MergeFormOptions>(key: K, value: string) {
           class="min-h-11 w-full rounded-md border border-[#d9e2cf] bg-white px-3 py-2 text-sm text-[#23301e] outline-none transition focus:border-kiwi-400 focus:ring-2 focus:ring-kiwi-100 disabled:cursor-not-allowed disabled:bg-[#f4f7ed]"
           @input="updateOption('musicVolume', ($event.target as HTMLInputElement).value)"
         />
-        <p class="mt-2 text-xs text-[#66735e]">Background music mix level.</p>
+        <p class="mt-2 text-xs text-[#66735e]">{{ musicVolumeHelp }}</p>
       </label>
     </div>
   </section>

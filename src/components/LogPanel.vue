@@ -1,6 +1,10 @@
 <script setup lang="ts">
 defineProps<{
   logs: string[]
+  title: string
+  description: string
+  linesLabel: string
+  emptyLabel: string
 }>()
 </script>
 
@@ -8,11 +12,11 @@ defineProps<{
   <section class="rounded-md border border-[#d9e2cf] bg-white p-5">
     <div class="flex items-center justify-between gap-3">
       <div>
-        <p class="text-sm font-semibold text-[#23301e]">Logs</p>
-        <p class="mt-1 text-xs text-[#66735e]">Dry-run output, generated command, and live backend job logs.</p>
+        <p class="text-sm font-semibold text-[#23301e]">{{ title }}</p>
+        <p class="mt-1 text-xs text-[#66735e]">{{ description }}</p>
       </div>
       <span class="rounded-full border border-[#d7dfcc] bg-[#f8faf4] px-3 py-1 text-xs font-medium text-[#66735e]">
-        {{ logs.length }} lines
+        {{ logs.length }} {{ linesLabel }}
       </span>
     </div>
 
@@ -24,7 +28,7 @@ defineProps<{
           {{ line }}
         </p>
       </template>
-      <p v-else class="text-[#9db08b]">Logs will appear here after a scan, dry run, or merge.</p>
+      <p v-else class="text-[#9db08b]">{{ emptyLabel }}</p>
     </div>
   </section>
 </template>
