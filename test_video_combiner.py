@@ -118,10 +118,15 @@ class VideoCombinerTests(unittest.TestCase):
 
             self.assertIn("Found 1 MP4 files", prepared.messages)
             self.assertIn("Found 1 soundtrack tracks", prepared.messages)
-            self.assertIn("-filter_complex", prepared.command)
+            self.assertIn("-filter_complex_script", prepared.command)
             self.assertEqual(prepared.summary.mp4_count, 1)
             self.assertEqual(prepared.summary.image_count, 0)
             self.assertEqual(prepared.summary.music_count, 1)
+            filter_script = Path(
+                prepared.command[prepared.command.index("-filter_complex_script") + 1]
+            )
+            self.assertTrue(filter_script.exists())
+            self.assertIn("anullsrc", filter_script.read_text(encoding="utf-8"))
 
     def test_writes_ffmpeg_concat_list_with_escaped_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +246,54 @@ class VideoCombinerTests(unittest.TestCase):
         self.assertIn("[a0][a1]concat=n=2:v=0:a=1[original]", filter_complex)
         self.assertIn("[3:a:0]volume=0.85[music]", filter_complex)
         self.assertIn("[original][music]amix=inputs=2:duration=first:dropout_transition=2[a]", filter_complex)
+
+    def test_builds_short_ffmpeg_command_when_all_videos_have_audio(self):
+        cmd = video_combiner.build_ffmpeg_command(
+            video_list=Path("/tmp/videos.txt"),
+            videos=[Path("/tmp/clip1.mp4"), Path("/tmp/clip2.mp4")],
+            audio_flags=[True, True],
+            durations=[4.5, 6.0],
+            music_list=Path("/tmp/music.txt"),
+            output=Path("/tmp/out.mp4"),
+            original_volume=0.2,
+            music_volume=0.85,
+        )
+
+        self.assertEqual(
+            cmd,
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                "/tmp/videos.txt",
+                "-stream_loop",
+                "-1",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                "/tmp/music.txt",
+                "-filter_complex",
+                "[0:a:0]volume=0.2,aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[original];[1:a:0]volume=0.85[music];[original][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
+                "-map",
+                "0:v:0",
+                "-map",
+                "[a]",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-shortest",
+                "/tmp/out.mp4",
+            ],
+        )
 
     def test_builds_rendered_command_for_interleaved_photo_timeline(self):
         items = [
@@ -396,10 +449,16 @@ class VideoCombinerTests(unittest.TestCase):
             (music / "Disc 1" / "01.mp3").write_text("x")
 
             log = StringIO()
+            captured_filter_complex: dict[str, str] = {}
+
+            def fake_run(command, **kwargs):
+                filter_script = Path(command[command.index("-filter_complex_script") + 1])
+                captured_filter_complex["value"] = filter_script.read_text(encoding="utf-8")
+
             with (
                 patch("video_combiner.has_audio_stream", side_effect=[False, True]),
                 patch("video_combiner.get_duration", side_effect=[4.5, 6.0]),
-                patch("subprocess.run") as run,
+                patch("subprocess.run", side_effect=fake_run) as run,
             ):
                 video_combiner.merge_videos(
                     input_dir=videos,
@@ -409,7 +468,7 @@ class VideoCombinerTests(unittest.TestCase):
                 )
 
             command = run.call_args.args[0]
-            filter_complex = command[command.index("-filter_complex") + 1]
+            filter_complex = captured_filter_complex["value"]
             self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000:d=4.5[a0]", filter_complex)
             self.assertIn(
                 "[2:a:0]volume=0.2,aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1]",

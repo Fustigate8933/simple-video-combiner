@@ -172,6 +172,7 @@ def prepare_merge(
             original_volume=original_volume,
             music_volume=music_volume,
         )
+        command = externalize_filter_complex(command, temp_dir / "render-filter.txt")
     else:
         messages.append("Writing concat lists")
         write_concat_list(videos, video_list)
@@ -186,6 +187,7 @@ def prepare_merge(
             original_volume=original_volume,
             music_volume=music_volume,
         )
+        command = externalize_filter_complex(command, temp_dir / "audio-filter.txt")
 
     return PreparedMerge(
         command=command,
@@ -272,6 +274,46 @@ def build_ffmpeg_command(
     if not (len(videos) == len(audio_flags) == len(durations)):
         raise ValueError("videos, audio_flags, and durations must have the same length")
 
+    if videos and all(audio_flags):
+        return [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(video_list),
+            "-stream_loop",
+            "-1",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(music_list),
+            "-filter_complex",
+            (
+                f"[0:a:0]volume={original_volume},"
+                "aformat=sample_rates=48000:channel_layouts=stereo,"
+                "asetpts=PTS-STARTPTS[original];"
+                f"[1:a:0]volume={music_volume}[music];"
+                "[original][music]amix=inputs=2:duration=first:dropout_transition=2[a]"
+            ),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[a]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            str(output),
+        ]
+
     command = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(video_list)]
     for video in videos:
         command.extend(["-i", str(video)])
@@ -324,6 +366,18 @@ def build_ffmpeg_command(
         ]
     )
     return command
+
+
+def externalize_filter_complex(command: list[str], script_path: Path) -> list[str]:
+    if "-filter_complex" not in command:
+        return command
+
+    next_command = list(command)
+    index = next_command.index("-filter_complex")
+    filter_complex = next_command[index + 1]
+    script_path.write_text(filter_complex, encoding="utf-8")
+    next_command[index:index + 2] = ["-filter_complex_script", str(script_path)]
+    return next_command
 
 
 def build_rendered_ffmpeg_command(
