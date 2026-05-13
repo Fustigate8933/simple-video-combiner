@@ -133,8 +133,7 @@ class VideoCombinerTests(unittest.TestCase):
 
             self.assertEqual(
                 output.read_text(),
-                "file 'file:///tmp/plain.mp4'\n"
-                "file 'file:///tmp/it%27s%20fine.mp4'\n",
+                "file '/tmp/plain.mp4'\nfile '/tmp/it'\\''s fine.mp4'\n",
             )
 
     def test_writes_ffmpeg_concat_list_as_utf8(self):
@@ -146,11 +145,11 @@ class VideoCombinerTests(unittest.TestCase):
 
         write_text.assert_called_once_with(
             output,
-            f"file '{video.resolve().as_uri()}'\n",
+            f"file '{video.resolve()}'\n",
             encoding="utf-8",
         )
 
-    def test_quotes_windows_paths_as_file_uris_for_concat_lists(self):
+    def test_quotes_windows_drive_paths_with_forward_slashes_for_concat_lists(self):
         with patch.object(
             Path,
             "resolve",
@@ -158,7 +157,17 @@ class VideoCombinerTests(unittest.TestCase):
         ):
             quoted = video_combiner.quote_for_concat_file(Path("ignored.mp4"))
 
-        self.assertEqual(quoted, "'file:///C:/Users/liede/Videos/it%27s%20fine.mp4'")
+        self.assertEqual(quoted, "'C:/Users/liede/Videos/it'\\''s fine.mp4'")
+
+    def test_quotes_windows_unc_paths_with_forward_slashes_for_concat_lists(self):
+        with patch.object(
+            Path,
+            "resolve",
+            return_value=PureWindowsPath(r"\\VBoxSvr\share\dir\it's fine.mp4"),
+        ):
+            quoted = video_combiner.quote_for_concat_file(Path("ignored.mp4"))
+
+        self.assertEqual(quoted, "'//VBoxSvr/share/dir/it'\\''s fine.mp4'")
 
     def test_gets_video_duration_with_ffprobe(self):
         with patch("subprocess.run") as run:
@@ -278,6 +287,16 @@ class VideoCombinerTests(unittest.TestCase):
             run.return_value.stdout = ""
 
             self.assertFalse(video_combiner.has_audio_stream(Path("/tmp/video.mp4")))
+
+    def test_reports_missing_ffprobe_clearly(self):
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("[WinError 2] missing")),
+            self.assertRaisesRegex(
+                ValueError,
+                "ffprobe not found. Install ffmpeg and ensure ffmpeg and ffprobe are on PATH.",
+            ),
+        ):
+            video_combiner.has_audio_stream(Path("/tmp/video.mp4"))
 
     def test_merge_logs_progress_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,6 +443,32 @@ class VideoCombinerTests(unittest.TestCase):
                 )
 
             self.assertEqual(log.getvalue(), "")
+
+    def test_merge_reports_missing_ffmpeg_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            videos = root / "videos"
+            music = root / "music"
+            videos.mkdir()
+            (music / "Disc 1").mkdir(parents=True)
+
+            (videos / "CAM_0001.mp4").write_text("x")
+            (music / "Disc 1" / "01.mp3").write_text("x")
+
+            with (
+                patch("video_combiner.has_audio_stream", return_value=False),
+                patch("video_combiner.get_duration", return_value=10.0),
+                patch("subprocess.run", side_effect=FileNotFoundError("[WinError 2] missing")),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "ffmpeg not found. Install ffmpeg and ensure ffmpeg and ffprobe are on PATH.",
+                ),
+            ):
+                video_combiner.merge_videos(
+                    input_dir=videos,
+                    output=root / "out.mp4",
+                    music_dir=music,
+                )
 
 
 if __name__ == "__main__":

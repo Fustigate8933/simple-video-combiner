@@ -200,7 +200,8 @@ def prepare_merge(
 
 def quote_for_concat_file(path: Path) -> str:
     """Quote a path for ffmpeg concat demuxer list files."""
-    return "'" + path.resolve().as_uri() + "'"
+    normalized = path.resolve().as_posix()
+    return "'" + normalized.replace("'", "'\\''") + "'"
 
 
 def write_concat_list(paths: Iterable[Path], output: Path) -> None:
@@ -208,8 +209,19 @@ def write_concat_list(paths: Iterable[Path], output: Path) -> None:
     output.write_text("".join(lines), encoding="utf-8")
 
 
+def run_checked(command: Sequence[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    try:
+        kwargs.setdefault("check", True)
+        return subprocess.run(command, **kwargs)
+    except FileNotFoundError as exc:
+        tool = command[0]
+        raise ValueError(
+            f"{tool} not found. Install ffmpeg and ensure ffmpeg and ffprobe are on PATH."
+        ) from exc
+
+
 def has_audio_stream(video: Path) -> bool:
-    result = subprocess.run(
+    result = run_checked(
         [
             "ffprobe",
             "-v",
@@ -222,7 +234,6 @@ def has_audio_stream(video: Path) -> bool:
             "csv=p=0",
             str(video),
         ],
-        check=True,
         capture_output=True,
         text=True,
     )
@@ -230,7 +241,7 @@ def has_audio_stream(video: Path) -> bool:
 
 
 def get_duration(video: Path) -> float:
-    result = subprocess.run(
+    result = run_checked(
         [
             "ffprobe",
             "-v",
@@ -241,7 +252,6 @@ def get_duration(video: Path) -> float:
             "default=noprint_wrappers=1:nokey=1",
             str(video),
         ],
-        check=True,
         capture_output=True,
         text=True,
     )
@@ -436,7 +446,7 @@ def merge_videos(
 
         output.parent.mkdir(parents=True, exist_ok=True)
         log_message("Running ffmpeg")
-        subprocess.run(prepared.command, check=True)
+        run_checked(prepared.command)
         log_message(f"Output: {output}")
         return prepared.command
 
